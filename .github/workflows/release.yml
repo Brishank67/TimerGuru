@@ -1,0 +1,77 @@
+name: Release TimerGuru
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Create keystore if missing
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "$KS_PASS" ]; then
+            echo "KEYSTORE_PASSWORD secret is missing"
+            exit 1
+          fi
+          if [ ! -f release.keystore.enc ]; then
+            keytool -genkeypair -keystore release.keystore -alias timerguru -keyalg RSA -keysize 2048 -validity 10000 -storepass "$KS_PASS" -keypass "$KS_PASS" -dname "CN=AruShield Tech, O=AruShield Tech, C=IN"
+            openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:KS_PASS -in release.keystore -out release.keystore.enc
+            rm release.keystore
+            git config user.name "github-actions"
+            git config user.email "actions@github.com"
+            git add release.keystore.enc
+            git commit -m "Add encrypted release keystore"
+            git push
+          fi
+
+      - name: Unzip project
+        run: |
+          rm -rf src_proj
+          mkdir src_proj
+          unzip -q app.zip -d src_proj
+
+      - name: Decrypt keystore
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: openssl enc -d -aes-256-cbc -pbkdf2 -pass env:KS_PASS -in release.keystore.enc -out src_proj/release.keystore
+
+      - name: Accept Android licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build signed release APK
+        working-directory: src_proj
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/src_proj/release.keystore
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: timerguru
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Copy APK
+        run: cp src_proj/app/build/outputs/apk/release/app-release.apk TimerGuru-release.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TimerGuru-release-apk
+          path: TimerGuru-release.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: release-latest
+          name: TimerGuru signed release
+          files: TimerGuru-release.apk
